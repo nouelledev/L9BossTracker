@@ -3,13 +3,8 @@
 import { CalendarDays, Clock3, MapPin, RotateCcw, Search, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { BOSSES, Boss } from "./bosses";
+import { BossRecord, BossRecords, isBossRecords } from "./timers";
 
-type BossRecord = {
-  deathAt: string;
-  nextSpawnAt: string;
-};
-
-type BossRecords = Record<string, BossRecord>;
 type Meridiem = "AM" | "PM";
 type FilterType = "all" | "fixed" | "variable" | "spawning";
 
@@ -98,16 +93,62 @@ export default function Home() {
   const [filterType, setFilterType] = useState<FilterType>("all");
   const [message, setMessage] = useState("");
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
+  const [serverStorageAvailable, setServerStorageAvailable] = useState(false);
 
   useEffect(() => {
-    const savedRecords = window.localStorage.getItem(STORAGE_KEY);
-    if (savedRecords) setRecords(JSON.parse(savedRecords) as BossRecords);
-    setHasLoadedStorage(true);
+    let cancelled = false;
+
+    async function loadRecords() {
+      const savedRecords = window.localStorage.getItem(STORAGE_KEY);
+      if (savedRecords) {
+        const parsed = JSON.parse(savedRecords) as unknown;
+        if (isBossRecords(parsed)) setRecords(parsed);
+      }
+
+      try {
+        const response = await fetch("/api/timers", { cache: "no-store" });
+        if (!response.ok) throw new Error("Could not load shared timers.");
+        const data = (await response.json()) as { records?: unknown; storage?: string };
+        if (!cancelled && data.storage === "redis" && isBossRecords(data.records)) {
+          setRecords(data.records);
+          setServerStorageAvailable(true);
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data.records));
+        } else if (!cancelled) {
+          setServerStorageAvailable(false);
+        }
+      } catch {
+        if (!cancelled) setServerStorageAvailable(false);
+      } finally {
+        if (!cancelled) setHasLoadedStorage(true);
+      }
+    }
+
+    loadRecords();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     if (!hasLoadedStorage) return;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+
+    async function saveRecords() {
+      try {
+        const response = await fetch("/api/timers", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ records }),
+        });
+        if (!response.ok) throw new Error("Could not save shared timers.");
+        const data = (await response.json()) as { storage?: string };
+        setServerStorageAvailable(data.storage === "redis");
+      } catch {
+        setServerStorageAvailable(false);
+      }
+    }
+
+    saveRecords();
   }, [hasLoadedStorage, records]);
 
   useEffect(() => {
@@ -235,6 +276,11 @@ export default function Home() {
       )}
 
       {message && <p className="message" aria-live="polite">{message}</p>}
+      {!serverStorageAvailable && (
+        <p className="storage-note">
+          Timers are saved on this browser. Add Vercel KV or Upstash Redis env vars to share timers across the guild.
+        </p>
+      )}
 
       <section className="boss-table" aria-label="Boss list">
         <header className="table-header">
